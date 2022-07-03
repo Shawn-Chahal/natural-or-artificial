@@ -7,6 +7,7 @@ import tensorflow as tf
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import random
 
 
 def process_path(file_path, training=False):
@@ -83,18 +84,18 @@ def plot_learning_curve():
     fig, axs = plt.subplots(nrows=2, ncols=1, figsize=(6.5, 6.5), dpi=600, constrained_layout=True)
     axs = axs.ravel()
 
-    axs[0].plot(dict_loss["Images trained"], dict_loss["Loss (Training)"], label="Training", color="tab:blue")
-    axs[0].plot(dict_loss["Images trained"], dict_loss["Loss (Validation)"], label="Validation", color="tab:orange")
+    axs[0].plot(dict_loss[S_IMAGES_TRAINED], dict_loss["Loss (Training)"], label="Training", color="tab:blue")
+    axs[0].plot(dict_loss[S_IMAGES_TRAINED], dict_loss["Loss (Validation)"], label="Validation", color="tab:orange")
     axs[0].legend()
     axs[0].set_xlim(left=0)
-    axs[0].set_xlabel("Images trained")
+    axs[0].set_xlabel(S_IMAGES_TRAINED)
     axs[0].set_ylabel("Loss")
 
-    axs[1].plot(dict_loss["Images trained"], dict_loss["Accuracy (Training)"], label="Training", color="tab:blue")
-    axs[1].plot(dict_loss["Images trained"], dict_loss["Accuracy (Validation)"], label="Validation", color="tab:orange")
+    axs[1].plot(dict_loss[S_IMAGES_TRAINED], dict_loss[S_ACCURACY_T], label="Training", color="tab:blue")
+    axs[1].plot(dict_loss[S_IMAGES_TRAINED], dict_loss[S_ACCURACY_V], label="Validation", color="tab:orange")
     axs[1].legend()
     axs[1].set_xlim(left=0)
-    axs[1].set_xlabel("Images trained")
+    axs[1].set_xlabel(S_IMAGES_TRAINED)
     axs[1].set_ylabel("Accuracy")
 
     fig.savefig(os.path.join("logs", "learning_curve.png"))
@@ -122,30 +123,57 @@ def get_validation_loss_accuracy():
     return np.mean(loss_valids), np.mean(accuracy_valids)
 
 
-tuning_hyperparameters = False
-model_version = 0
+def get_train_validation_test_folds():
+    validation_dict = {}
+    test_dict = {}
+    train_dict = {}
 
-tf.random.set_seed(1)
-ReadableTime = namedtuple('ReadableTime', ['days', 'hours', 'minutes', 'seconds'])
+    list_train = []
+    list_validation = []
+    list_test = []
 
-data_dir = pathlib.Path('.')
-image_count = len(list(data_dir.glob(os.path.join('photos', '*', '*.jpg'))))
-CLASS_NAMES = np.array([item.name for item in data_dir.glob(os.path.join('photos', '*'))])
-pickle.dump(CLASS_NAMES, open(os.path.join('objects', 'CLASS_NAMES.pkl'), 'wb'))
+    for class_name in CLASS_NAMES:
+        validation_dict[class_name] = []
+        test_dict[class_name] = []
+        train_dict[class_name] = []
+        class_list = list(data_dir.glob(os.path.join('photos', f"{class_name}", '*.jpg')))
+        for n_sorted_images, class_image_path in enumerate(class_list, start=0):
+            class_image_path_string = str(class_image_path)
 
-if tuning_hyperparameters:
-    num_test = int(0.3 * image_count)
-    num_valid = int(0.1 * image_count)
-else:
-    num_test = int(0.05 * image_count)
-    num_valid = int(0.05 * image_count)
+            if n_sorted_images == 0:
+                train_dict[class_name].append(class_image_path_string)
 
-list_ds = tf.data.Dataset.list_files(str(os.path.join('photos', '*', '*.jpg')))
-list_ds.shuffle(buffer_size=image_count, reshuffle_each_iteration=False)
-list_ds_test = list_ds.take(num_test)
-list_ds_train_valid = list_ds.skip(num_test)
-list_ds_valid = list_ds_train_valid.take(num_valid)
-list_ds_train = list_ds_train_valid.skip(num_valid)
+            elif (len(train_dict[class_name]) / n_sorted_images) < TRAIN_SPLIT:
+                train_dict[class_name].append(class_image_path_string)
+
+            elif (len(validation_dict[class_name]) / n_sorted_images) < VALIDATION_SPLIT:
+                validation_dict[class_name].append(class_image_path_string)
+
+            elif (len(test_dict[class_name]) / n_sorted_images) < TEST_SPLIT:
+                test_dict[class_name].append(class_image_path_string)
+
+        print(f"{class_name} | "
+              f"Train: {len(train_dict[class_name]) / len(class_list):.1%} | "
+              f"Validation: {len(validation_dict[class_name]) / len(class_list):.1%} | "
+              f"Test: {len(test_dict[class_name]) / len(class_list):.1%}")
+
+        list_train.extend(train_dict[class_name])
+        list_validation.extend(validation_dict[class_name])
+        list_test.extend(test_dict[class_name])
+        random.shuffle(list_train)
+        random.shuffle(list_validation)
+        random.shuffle(list_test)
+
+    return list_train, list_validation, list_test
+
+
+S_MODEL_VERSION = "Model version"
+S_IMAGES_TRAINED = "Images trained"
+S_TIME = "Time [s]"
+S_LOSS_T = "Loss (Training)"
+S_LOSS_V = "Loss (Validation)"
+S_ACCURACY_T = "Accuracy (Training)"
+S_ACCURACY_V = "Accuracy (Validation)"
 
 INPUT_DIM = 640
 IMG_DIM = 256
@@ -154,38 +182,65 @@ CHANNELS = 3
 BUFFER_SIZE = 1024
 FILTERS = (16, 256)
 KERNEL_SIZE = 3
-LOG_FREQUENCY = 12 * 60  # seconds
+LOG_FREQUENCY = 0.5 * 60  # seconds
+VALIDATION_SPLIT = 0.15
+TEST_SPLIT = 0.15
+TRAIN_SPLIT = 1.0 - VALIDATION_SPLIT - TEST_SPLIT
 
-ds_train = list_ds_train.map(lambda x: process_path(x, training=True))
-ds_train = ds_train.shuffle(buffer_size=BUFFER_SIZE).repeat().batch(BATCH_SIZE).repeat()
-ds_valid = list_ds_valid.map(lambda x: process_path(x)).batch(BATCH_SIZE)
+tuning_hyperparameters = True
+model_version = 8
 
+tf.random.set_seed(1)
+ReadableTime = namedtuple('ReadableTime', ['days', 'hours', 'minutes', 'seconds'])
+
+data_dir = pathlib.Path('.')
+
+image_count = len(list(data_dir.glob(os.path.join('photos', '*', '*.jpg'))))
+CLASS_NAMES = np.array([item.name for item in data_dir.glob(os.path.join('photos', '*'))])
+
+train_paths, valid_paths, test_paths = get_train_validation_test_folds()
+total_paths = train_paths + valid_paths + test_paths
+
+pickle.dump(CLASS_NAMES, open(os.path.join('objects', 'CLASS_NAMES.pkl'), 'wb'))
+
+if tuning_hyperparameters:
+    ds_train = tf.data.Dataset.from_tensor_slices(train_paths).map(lambda x: process_path(x, training=True))
+    ds_valid = tf.data.Dataset.from_tensor_slices(valid_paths).map(lambda x: process_path(x)).batch(BATCH_SIZE)
+    ds_test = tf.data.Dataset.from_tensor_slices(test_paths).map(lambda x: process_path(x)).batch(BATCH_SIZE)
+
+else:
+    ds_train = tf.data.Dataset.from_tensor_slices(total_paths).map(lambda x: process_path(x, training=True))
+    ds_valid = None
+    ds_test = None
+
+ds_train = ds_train.shuffle(buffer_size=BUFFER_SIZE).repeat().batch(BATCH_SIZE)  # THIS IS THE PROPER ORDER
 optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
 loss_cce = tf.keras.losses.CategoricalCrossentropy(from_logits=True, label_smoothing=0.1)
 
 if model_version == 0:
     model = create_network()
-    dict_loss = {"Model version": [], "Images trained": [], "Time [s]": [],
-                 "Loss (Training)": [], "Loss (Validation)": [],
-                 "Accuracy (Training)": [], "Accuracy (Validation)": []}
+    dict_loss = {S_MODEL_VERSION: [], S_IMAGES_TRAINED: [], S_TIME: [],
+                 S_LOSS_T: [], S_LOSS_V: [],
+                 S_ACCURACY_T: [], S_ACCURACY_V: []}
 
     initial_batch_count = 0
     start_time = time.time()
 
 else:
-    model = tf.keras.models.load_model(get_model_path())
-
-    dict_loss = pd.read_csv(os.path.join("logs", "loss.csv")).to_dict("list")
-    initial_batch_count = int(dict_loss["Images trained"][-1] / BATCH_SIZE)
-    start_time = time.time() - dict_loss["Time [s]"][-1]
-    model_version = dict_loss["Model version"][-1]
+    model = tf.keras.models.load_model(get_model_path(model_version))
+    df_loss = pd.read_csv(os.path.join("logs", "loss.csv"))
+    mask = df_loss.loc[:, S_MODEL_VERSION] <= model_version
+    dict_loss = df_loss.loc[mask, :].to_dict("list")
+    initial_batch_count = int(dict_loss[S_IMAGES_TRAINED][-1] / BATCH_SIZE)
+    start_time = time.time() - dict_loss[S_TIME][-1]
+    model_version = dict_loss[S_MODEL_VERSION][-1]
 
 with open(os.path.join('logs', 'model_summary.txt'), 'w') as f_model_summary:
     model.summary(print_fn=(lambda x: f_model_summary.write('{}\n'.format(x))))
 
 last_status = time.time()
-last_batch_count = initial_batch_count
-last_status_loss = {"Loss (Training)": [], "Accuracy (Training)": []}
+last_batch_count = initial_batch_count + 0
+last_status_loss = {S_LOSS_T: [], S_ACCURACY_T: []}
 
 for batch_count, (images, labels) in enumerate(ds_train, start=initial_batch_count):
 
@@ -196,8 +251,8 @@ for batch_count, (images, labels) in enumerate(ds_train, start=initial_batch_cou
     grads = tape.gradient(loss, model.trainable_variables)
     optimizer.apply_gradients(zip(grads, model.trainable_variables))
 
-    last_status_loss["Loss (Training)"].append(loss.numpy())
-    last_status_loss["Accuracy (Training)"].append(get_accuracy(model_result, labels))
+    last_status_loss[S_LOSS_T].append(loss.numpy())
+    last_status_loss[S_ACCURACY_T].append(get_accuracy(model_result, labels))
 
     if time.time() - last_status > LOG_FREQUENCY:
         model_version += 1
@@ -207,37 +262,42 @@ for batch_count, (images, labels) in enumerate(ds_train, start=initial_batch_cou
         total_time = time.time() - start_time
         print_time = get_print_time(total_time)
         images_per_hour = BATCH_SIZE * (batch_count - last_batch_count) / (time.time() - last_status) * 3600
-        validation_loss, validation_accuracy = get_validation_loss_accuracy()
 
-        dict_loss["Model version"].append(model_version)
-        dict_loss["Images trained"].append(BATCH_SIZE * batch_count)
-        dict_loss["Time [s]"].append(total_time)
-        dict_loss["Loss (Training)"].append(np.mean(last_status_loss["Loss (Training)"]))
-        dict_loss["Loss (Validation)"].append(validation_loss)
-        dict_loss["Accuracy (Training)"].append(np.mean(last_status_loss["Accuracy (Training)"]))
-        dict_loss["Accuracy (Validation)"].append(validation_accuracy)
+        dict_loss[S_MODEL_VERSION].append(model_version)
+        dict_loss[S_IMAGES_TRAINED].append(BATCH_SIZE * batch_count)
+        dict_loss[S_TIME].append(total_time)
+        dict_loss[S_LOSS_T].append(np.mean(last_status_loss[S_LOSS_T]))
+        dict_loss[S_ACCURACY_T].append(np.mean(last_status_loss[S_ACCURACY_T]))
+
+        if tuning_hyperparameters:
+            validation_loss, validation_accuracy = get_validation_loss_accuracy()
+            dict_loss[S_LOSS_V].append(validation_loss)
+            dict_loss[S_ACCURACY_V].append(validation_accuracy)
+        else:
+            dict_loss[S_LOSS_V].append(None)
+            dict_loss[S_ACCURACY_V].append(None)
 
         pd.DataFrame.from_dict(dict_loss).to_csv(os.path.join("logs", "loss.csv"), index=False)
         plot_learning_curve()
 
         print(
-            f"Version: {dict_loss['Model version'][-1]:4d} | "
-            f"Images trained: {dict_loss['Images trained'][-1]:8d} | "
+            f"{S_MODEL_VERSION}: {dict_loss[S_MODEL_VERSION][-1]:4d} | "
+            f"{S_IMAGES_TRAINED}: {dict_loss[S_IMAGES_TRAINED][-1]:8d} | "
             f"Time: {print_time.days}:{print_time.hours}:{print_time.minutes:02d}:{print_time.seconds:02d} | "
-            f"Loss (T): {dict_loss['Loss (Training)'][-1]:6.2f} | "
-            f"Loss (V): {dict_loss['Loss (Validation)'][-1]:6.2f} | "
-            f"Accuracy (T): {dict_loss['Accuracy (Training)'][-1]:6.2f} | "
-            f"Accuracy (V): {dict_loss['Accuracy (Validation)'][-1]:6.2f} | "
-            f"Images per hour: {images_per_hour:6.0f}"
+            f"{S_LOSS_T}: {dict_loss[S_LOSS_T][-1]:6.4f} | "
+            f"{S_LOSS_V}: {dict_loss[S_LOSS_V][-1]:6.4f} | "
+            f"{S_ACCURACY_T}: {dict_loss[S_ACCURACY_T][-1]:6.2%} | "
+            f"{S_ACCURACY_V}: {dict_loss[S_ACCURACY_V][-1]:6.2%} | "
+            f"Images per hour: {images_per_hour:5.0f}"
         )
 
         last_status = time.time()
         last_batch_count = batch_count + 0
-        last_status_loss = {"Loss (Training)": [], "Accuracy (Training)": []}
+        last_status_loss = {S_LOSS_T: [], S_ACCURACY_T: []}
 
 """
 
-ds_test = list_ds_test.map(lambda x: process_path(x, IMG_DIM, CLASS_NAMES)).batch(BATCH_SIZE)
+
 test_log = model.evaluate(ds_test, verbose=0)
 
 with open(os.path.join('logs', f'test_log-{time_stamp}.txt'), 'w') as f_test_log:
