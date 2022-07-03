@@ -1,3 +1,4 @@
 .idea/
 __pycache__/
-objects/model_checkpoints/
+/objects/complete/model_checkpoints/
+/objects/tuning/model_checkpoints/
