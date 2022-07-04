@@ -86,14 +86,16 @@ def plot_learning_curve():
     axs = axs.ravel()
 
     axs[0].plot(dict_loss[S_IMAGES_TRAINED], dict_loss[S_LOSS_T], label="Training", color="tab:blue")
-    axs[0].plot(dict_loss[S_IMAGES_TRAINED], dict_loss[S_LOSS_V], label="Validation", color="tab:orange")
+    if tuning_hyperparameters:
+        axs[0].plot(dict_loss[S_IMAGES_TRAINED], dict_loss[S_LOSS_V], label="Validation", color="tab:orange")
     axs[0].legend()
     axs[0].set_xlim(left=0)
     axs[0].set_xlabel(S_IMAGES_TRAINED)
     axs[0].set_ylabel("Loss")
 
     axs[1].plot(dict_loss[S_IMAGES_TRAINED], dict_loss[S_ACCURACY_T], label="Training", color="tab:blue")
-    axs[1].plot(dict_loss[S_IMAGES_TRAINED], dict_loss[S_ACCURACY_V], label="Validation", color="tab:orange")
+    if tuning_hyperparameters:
+        axs[1].plot(dict_loss[S_IMAGES_TRAINED], dict_loss[S_ACCURACY_V], label="Validation", color="tab:orange")
     axs[1].legend()
     axs[1].set_xlim(left=0)
     axs[1].set_xlabel(S_IMAGES_TRAINED)
@@ -113,15 +115,15 @@ def get_loss_tensor(y_real, y_model):
     return loss_cce(y_real, y_model)
 
 
-def get_validation_loss_accuracy():
-    loss_valids = []
-    accuracy_valids = []
-    for images_valid, labels_valid in ds_valid:
-        results_valid = model(images_valid)
-        loss_valids.append(get_loss_tensor(labels_valid, results_valid).numpy())
-        accuracy_valids.append(get_accuracy(results_valid, labels_valid))
+def get_ds_loss_accuracy(ds_local):
+    loss_local = []
+    accuracy_local = []
+    for images_local, labels_local in ds_local:
+        results_valid = model(images_local)
+        loss_local.append(get_loss_tensor(labels_local, results_valid).numpy())
+        accuracy_local.append(get_accuracy(results_valid, labels_local))
 
-    return np.mean(loss_valids), np.mean(accuracy_valids)
+    return np.mean(loss_local), np.mean(accuracy_local)
 
 
 def get_train_validation_test_folds():
@@ -153,11 +155,6 @@ def get_train_validation_test_folds():
             elif (len(test_dict[class_name]) / n_sorted_images) < TEST_SPLIT:
                 test_dict[class_name].append(class_image_path_string)
 
-        print(f"{class_name} | "
-              f"Train: {len(train_dict[class_name]) / len(class_list):.1%} | "
-              f"Validation: {len(validation_dict[class_name]) / len(class_list):.1%} | "
-              f"Test: {len(test_dict[class_name]) / len(class_list):.1%}")
-
         list_train.extend(train_dict[class_name])
         list_validation.extend(validation_dict[class_name])
         list_test.extend(test_dict[class_name])
@@ -166,6 +163,74 @@ def get_train_validation_test_folds():
         random.shuffle(list_test)
 
     return list_train, list_validation, list_test
+
+
+def train_model(initial_model_version_local):
+    model_version = initial_model_version_local + 0
+    last_status = time.time()
+    last_batch_count = initial_batch_count + 0
+    last_status_loss = {S_LOSS_T: [], S_ACCURACY_T: []}
+
+    for batch_count, (images, labels) in enumerate(ds_train, start=initial_batch_count):
+
+        with tf.GradientTape() as tape:
+            model_result = model(images, training=True)
+            loss = get_loss_tensor(labels, model_result)
+
+        grads = tape.gradient(loss, model.trainable_variables)
+        optimizer.apply_gradients(zip(grads, model.trainable_variables))
+
+        last_status_loss[S_LOSS_T].append(loss.numpy())
+        last_status_loss[S_ACCURACY_T].append(get_accuracy(model_result, labels))
+
+        if time.time() - last_status > LOG_FREQUENCY:
+            model_version += 1
+            model.save(get_model_path(model_version))
+            model.save(get_model_path())
+
+            total_time = time.time() - start_time
+            print_time = get_print_time(total_time)
+            images_per_hour = BATCH_SIZE * (batch_count - last_batch_count) / (time.time() - last_status) * 3600
+
+            dict_loss[S_MODEL_VERSION].append(model_version)
+            dict_loss[S_IMAGES_TRAINED].append(BATCH_SIZE * batch_count)
+            dict_loss[S_TIME].append(total_time)
+            dict_loss[S_LOSS_T].append(np.mean(last_status_loss[S_LOSS_T]))
+            dict_loss[S_ACCURACY_T].append(np.mean(last_status_loss[S_ACCURACY_T]))
+
+            if tuning_hyperparameters:
+                validation_loss, validation_accuracy = get_ds_loss_accuracy(ds_valid)
+                dict_loss[S_LOSS_V].append(validation_loss)
+                dict_loss[S_ACCURACY_V].append(validation_accuracy)
+            else:
+                dict_loss[S_LOSS_V].append(None)
+                dict_loss[S_ACCURACY_V].append(None)
+
+            pd.DataFrame.from_dict(dict_loss).to_csv(os.path.join(S_LOGS, sub_dir, "loss.csv"), index=False)
+            plot_learning_curve()
+
+            info = f"{S_MODEL_VERSION}: {dict_loss[S_MODEL_VERSION][-1]:4d} | " \
+                   f"{S_IMAGES_TRAINED}: {dict_loss[S_IMAGES_TRAINED][-1]:8d} | " \
+                   f"Time: {print_time.days}:{print_time.hours}:{print_time.minutes:02d}:{print_time.seconds:02d} | " \
+                   f"{S_LOSS_T}: {dict_loss[S_LOSS_T][-1]:6.4f} | " \
+                   f"{S_ACCURACY_T}: {dict_loss[S_ACCURACY_T][-1]:6.2%} | "
+
+            if tuning_hyperparameters:
+                info += f"{S_ACCURACY_V}: {dict_loss[S_ACCURACY_V][-1]:6.1%} | " \
+                        f"{S_ACCURACY_V}: {dict_loss[S_ACCURACY_V][-1]:6.1%}"
+
+            info += f"Images per hour: {images_per_hour:7.0f}"
+
+            print(info)
+
+            last_status = time.time()
+            last_batch_count = batch_count + 0
+            last_status_loss = {S_LOSS_T: [], S_ACCURACY_T: []}
+
+
+def test_model():
+    test_loss, test_accuracy = get_ds_loss_accuracy(ds_test)
+    print(f"Loss (Test): {test_loss:6.4f} | Accuracy (Test): {test_accuracy:6.2%}")
 
 
 S_MODEL_VERSION = "Model version"
@@ -193,8 +258,9 @@ VALIDATION_SPLIT = 0.15
 TEST_SPLIT = 0.15
 TRAIN_SPLIT = 1.0 - VALIDATION_SPLIT - TEST_SPLIT
 
-tuning_hyperparameters = True
-model_version = 0
+mode = "train"
+tuning_hyperparameters = False
+initial_model_version = 0
 
 tf.random.set_seed(1)
 ReadableTime = namedtuple('ReadableTime', ['days', 'hours', 'minutes', 'seconds'])
@@ -222,7 +288,7 @@ ds_train = ds_train.shuffle(buffer_size=BUFFER_SIZE).repeat().batch(BATCH_SIZE) 
 optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
 loss_cce = tf.keras.losses.CategoricalCrossentropy(from_logits=True, label_smoothing=0.1)
 
-if model_version == 0:
+if initial_model_version == 0:
     model = create_network()
     dict_loss = {S_MODEL_VERSION: [], S_IMAGES_TRAINED: [], S_TIME: [],
                  S_LOSS_T: [], S_LOSS_V: [],
@@ -232,82 +298,19 @@ if model_version == 0:
     start_time = time.time()
 
 else:
-    model = tf.keras.models.load_model(get_model_path(model_version))
-
+    model = tf.keras.models.load_model(get_model_path(initial_model_version))
     df_loss = pd.read_csv(os.path.join(S_LOGS, sub_dir, "loss.csv"))
 
-    mask = df_loss.loc[:, S_MODEL_VERSION] <= model_version
+    mask = df_loss.loc[:, S_MODEL_VERSION] <= initial_model_version
     dict_loss = df_loss.loc[mask, :].to_dict("list")
     initial_batch_count = int(dict_loss[S_IMAGES_TRAINED][-1] / BATCH_SIZE)
     start_time = time.time() - dict_loss[S_TIME][-1]
-    model_version = dict_loss[S_MODEL_VERSION][-1]
+    initial_model_version = dict_loss[S_MODEL_VERSION][-1]
 
 with open(os.path.join(S_LOGS, sub_dir, 'model_summary.txt'), 'w') as f_model_summary:
     model.summary(print_fn=(lambda x: f_model_summary.write('{}\n'.format(x))))
 
-last_status = time.time()
-last_batch_count = initial_batch_count + 0
-last_status_loss = {S_LOSS_T: [], S_ACCURACY_T: []}
-
-for batch_count, (images, labels) in enumerate(ds_train, start=initial_batch_count):
-
-    with tf.GradientTape() as tape:
-        model_result = model(images, training=True)
-        loss = get_loss_tensor(labels, model_result)
-
-    grads = tape.gradient(loss, model.trainable_variables)
-    optimizer.apply_gradients(zip(grads, model.trainable_variables))
-
-    last_status_loss[S_LOSS_T].append(loss.numpy())
-    last_status_loss[S_ACCURACY_T].append(get_accuracy(model_result, labels))
-
-    if time.time() - last_status > LOG_FREQUENCY:
-        model_version += 1
-        model.save(get_model_path(model_version))
-        model.save(get_model_path())
-
-        total_time = time.time() - start_time
-        print_time = get_print_time(total_time)
-        images_per_hour = BATCH_SIZE * (batch_count - last_batch_count) / (time.time() - last_status) * 3600
-
-        dict_loss[S_MODEL_VERSION].append(model_version)
-        dict_loss[S_IMAGES_TRAINED].append(BATCH_SIZE * batch_count)
-        dict_loss[S_TIME].append(total_time)
-        dict_loss[S_LOSS_T].append(np.mean(last_status_loss[S_LOSS_T]))
-        dict_loss[S_ACCURACY_T].append(np.mean(last_status_loss[S_ACCURACY_T]))
-
-        if tuning_hyperparameters:
-            validation_loss, validation_accuracy = get_validation_loss_accuracy()
-            dict_loss[S_LOSS_V].append(validation_loss)
-            dict_loss[S_ACCURACY_V].append(validation_accuracy)
-        else:
-            dict_loss[S_LOSS_V].append(None)
-            dict_loss[S_ACCURACY_V].append(None)
-
-        pd.DataFrame.from_dict(dict_loss).to_csv(os.path.join(S_LOGS, sub_dir, "loss.csv"), index=False)
-        plot_learning_curve()
-
-        print(
-            f"{S_MODEL_VERSION}: {dict_loss[S_MODEL_VERSION][-1]:4d} | "
-            f"{S_IMAGES_TRAINED}: {dict_loss[S_IMAGES_TRAINED][-1]:8d} | "
-            f"Time: {print_time.days}:{print_time.hours}:{print_time.minutes:02d}:{print_time.seconds:02d} | "
-            f"{S_LOSS_T}: {dict_loss[S_LOSS_T][-1]:6.4f} | "
-            f"{S_LOSS_V}: {dict_loss[S_LOSS_V][-1]:6.4f} | "
-            f"{S_ACCURACY_T}: {dict_loss[S_ACCURACY_T][-1]:6.2%} | "
-            f"{S_ACCURACY_V}: {dict_loss[S_ACCURACY_V][-1]:6.2%} | "
-            f"Images per hour: {images_per_hour:5.0f}"
-        )
-
-        last_status = time.time()
-        last_batch_count = batch_count + 0
-        last_status_loss = {S_LOSS_T: [], S_ACCURACY_T: []}
-
-"""
-
-
-test_log = model.evaluate(ds_test, verbose=0)
-
-with open(os.path.join('logs', f'test_log-{time_stamp}.txt'), 'w') as f_test_log:
-    f_test_log.write('Test Loss:     {:.3f}\nTest Accuracy: {:.3f}'.format(test_log[0], test_log[1]))
-
-"""
+if mode == "train":
+    train_model(initial_model_version)
+elif mode == "test":
+    test_model()
